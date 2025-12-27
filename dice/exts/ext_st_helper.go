@@ -293,11 +293,23 @@ func cmdStValueMod(mctx *types.MsgContext, tmpl *types.GameSystemTemplateV2, att
 		isSetNew := true
 		if cur.TypeId == ds.VMTypeComputedValue {
 			cd, _ := cur.ReadComputed()
-			// dnd5eרָזנ
-			if v, ok := cd.Attrs.Load("base"); ok {
-				cur = v
-				isSetNew = false
+			// dnd5e专属：如果有base属性，使用base值且不覆盖
+			if cd != nil && cd.Attrs != nil {
+				if v, ok := cd.Attrs.Load("base"); ok {
+					cur = v
+					isSetNew = false
+					return cur, isSetNew
+				}
 			}
+			// 对于普通的computed value（如 &(教育)），计算出实际值
+			// 这样在进行+/-运算时才能得到正确的结果
+			cur = cur.ComputedExecute(vm, nil)
+			if vm.Error != nil {
+				// 如果计算出错，使用0
+				cur = ds.NewIntVal(0)
+				vm.Error = nil
+			}
+			// isSetNew保持为true，这样修改后的值会被存储
 		}
 		return cur, isSetNew
 	}
@@ -539,6 +551,10 @@ func getCmdStBase(soi CmdStOverrideInfo) *types.CmdItemInfo {
 			cardType := ReadCardType(mctx)
 
 			tmpl := ctx.GetCharTemplate()
+			// 立即设置GameSystem，确保VM创建时能使用正确的模板
+			ctx.GameSystem = tmpl
+			mctx.GameSystem = tmpl
+
 			tmplShow := tmpl // 用于st show的模板，如果show不同规则的模板，可以以其他规则格式显示
 			if cardType != tmplShow.Name {
 				if tmpl2, _ := ctx.Dice.GameSystemMapLoad(cardType); tmpl2 != nil {
@@ -550,6 +566,9 @@ func getCmdStBase(soi CmdStOverrideInfo) *types.CmdItemInfo {
 				if tmpl2, _ := ctx.Dice.GameSystemMapLoad(soi.TemplateName); tmpl2 != nil {
 					tmpl = tmpl2
 					tmplShow = tmpl2
+					// 更新GameSystem为新的模板
+					ctx.GameSystem = tmpl
+					mctx.GameSystem = tmpl
 				}
 			}
 
@@ -682,7 +701,7 @@ func getCmdStBase(soi CmdStOverrideInfo) *types.CmdItemInfo {
 				}
 
 				cmdStCharFormat(mctx, tmpl) // 转一下卡
-				mctx.GameSystem = tmpl
+				// GameSystem已经在函数开始时设置，这里不需要重复设置
 
 				// 进行简化卡的尝试解析
 				input := cmdArgs.CleanArgs

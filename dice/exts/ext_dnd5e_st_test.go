@@ -410,3 +410,35 @@ func TestDnd5eRollAfterSequentialCommands(t *testing.T) {
 	require.NotEmpty(t, reply, "expected roll command to produce output")
 	require.Contains(t, reply, "=9", "expected hp+1 to total 9 with buff applied, got %q", reply)
 }
+
+// TestIssue1524_CustomAttributeDisplayInRc 测试 Issue #1524
+// 问题：DND规则下用 .st 设置自定义属性后，.rc 检定时无法正确显示属性值
+// 例如：.st 长剑=4 后执行 .rc 长剑，显示 "9[d20] + = 13" 而不是 "9[d20] + 4 = 13"
+// 注意：此测试目前会失败，因为问题尚未修复
+func TestIssue1524_CustomAttributeDisplayInRc(t *testing.T) {
+	t.Skip("Issue #1524: 此问题尚未修复，跳过测试")
+
+	ctx, msg, stub, stCmd := newDnd5eTestContext(t)
+
+	// 设置自定义属性
+	executeStCommands(t, stub, ctx, msg, stCmd, ".st 长剑=4")
+
+	// 获取 rc 命令
+	ext, ok := stub.extensions["dnd5e"]
+	require.True(t, ok, "dnd5e extension should be registered")
+
+	cmdRc, ok := ext.CmdMap["rc"]
+	require.True(t, ok, "dnd5e extension should provide rc command")
+
+	// 执行检定
+	_, reply := executeCommandWith(t, stub, ctx, msg, ".rc 长剑", cmdRc, "rc", "ra", "rah", "rch", "drc")
+	require.NotEmpty(t, reply)
+
+	// 关键检查：输出应该包含 "+ 4" 或类似的属性值显示，而不是 "+  =" 或 "+ ="
+	t.Logf("Reply: %s", reply)
+
+	// 检查是否存在属性值缺失的情况
+	// Issue #1524: 输出类似 "9[d20] +  = 13" 应该是 "9[d20] + 4 = 13"
+	require.NotContains(t, reply, "+  =", "Issue #1524: custom attribute value should be displayed, not '+  ='")
+	require.Contains(t, reply, "4", "Issue #1524: custom attribute value '4' should appear in the result")
+}
