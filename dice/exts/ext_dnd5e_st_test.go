@@ -414,10 +414,7 @@ func TestDnd5eRollAfterSequentialCommands(t *testing.T) {
 // TestIssue1524_CustomAttributeDisplayInRc 测试 Issue #1524
 // 问题：DND规则下用 .st 设置自定义属性后，.rc 检定时无法正确显示属性值
 // 例如：.st 长剑=4 后执行 .rc 长剑，显示 "9[d20] + = 13" 而不是 "9[d20] + 4 = 13"
-// 注意：此测试目前会失败，因为问题尚未修复
 func TestIssue1524_CustomAttributeDisplayInRc(t *testing.T) {
-	t.Skip("Issue #1524: 此问题尚未修复，跳过测试")
-
 	ctx, msg, stub, stCmd := newDnd5eTestContext(t)
 
 	// 设置自定义属性
@@ -441,4 +438,72 @@ func TestIssue1524_CustomAttributeDisplayInRc(t *testing.T) {
 	// Issue #1524: 输出类似 "9[d20] +  = 13" 应该是 "9[d20] + 4 = 13"
 	require.NotContains(t, reply, "+  =", "Issue #1524: custom attribute value should be displayed, not '+  ='")
 	require.Contains(t, reply, "4", "Issue #1524: custom attribute value '4' should appear in the result")
+}
+
+// TestIssue1524_CustomAttributeWithExpression 测试自定义属性使用表达式的情况
+func TestIssue1524_CustomAttributeWithExpression(t *testing.T) {
+	ctx, msg, stub, stCmd := newDnd5eTestContext(t)
+
+	// 先设置智力
+	executeStCommands(t, stub, ctx, msg, stCmd, ".st 智力:14")
+
+	// 设置带表达式的自定义属性
+	executeStCommands(t, stub, ctx, msg, stCmd, ".st &火球术=1d6+智力调整值")
+
+	ext, ok := stub.extensions["dnd5e"]
+	require.True(t, ok)
+
+	cmdRc, ok := ext.CmdMap["rc"]
+	require.True(t, ok)
+
+	// 执行检定
+	_, reply := executeCommandWith(t, stub, ctx, msg, ".rc 火球术", cmdRc, "rc", "ra", "rah", "rch", "drc")
+	require.NotEmpty(t, reply)
+	t.Logf("Reply: %s", reply)
+
+	// 表达式的情况下，GetDetailText() 应该有内容
+	require.NotContains(t, reply, "+  =", "computed attribute should display detail")
+}
+
+// TestIssue1524_NegativeValue 测试负数属性值的显示
+func TestIssue1524_NegativeValue(t *testing.T) {
+	ctx, msg, stub, stCmd := newDnd5eTestContext(t)
+
+	// 设置负数属性
+	executeStCommands(t, stub, ctx, msg, stCmd, ".st 诅咒=-3")
+
+	ext, ok := stub.extensions["dnd5e"]
+	require.True(t, ok)
+
+	cmdRc, ok := ext.CmdMap["rc"]
+	require.True(t, ok)
+
+	_, reply := executeCommandWith(t, stub, ctx, msg, ".rc 诅咒", cmdRc, "rc", "ra", "rah", "rch", "drc")
+	require.NotEmpty(t, reply)
+	t.Logf("Reply (negative): %s", reply)
+
+	// 负数应该正确显示
+	require.NotContains(t, reply, "+  =", "negative value should be displayed")
+	require.Contains(t, reply, "-3", "negative value '-3' should appear")
+}
+
+// TestIssue1524_ZeroValue 测试零值属性的显示
+func TestIssue1524_ZeroValue(t *testing.T) {
+	ctx, msg, stub, stCmd := newDnd5eTestContext(t)
+
+	// 设置零值属性
+	executeStCommands(t, stub, ctx, msg, stCmd, ".st 中立=0")
+
+	ext, ok := stub.extensions["dnd5e"]
+	require.True(t, ok)
+
+	cmdRc, ok := ext.CmdMap["rc"]
+	require.True(t, ok)
+
+	_, reply := executeCommandWith(t, stub, ctx, msg, ".rc 中立", cmdRc, "rc", "ra", "rah", "rch", "drc")
+	require.NotEmpty(t, reply)
+	t.Logf("Reply (zero): %s", reply)
+
+	// 零值也应该正确显示
+	require.NotContains(t, reply, "+  =", "zero value should be displayed")
 }

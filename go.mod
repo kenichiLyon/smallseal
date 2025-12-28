@@ -11,11 +11,11 @@ require (
 	github.com/lascape/sat v1.0.4
 	github.com/peterh/liner v1.2.2
 	github.com/samber/lo v1.51.0
-	github.com/sealdice/dicescript v0.0.0-20250903023101-e8c6e09caab2
+	github.com/sealdice/dicescript v0.0.0-20251223051345-e8d2002150cd
 	github.com/stretchr/testify v1.9.0
 	github.com/tidwall/buntdb v1.3.1
 	go.uber.org/zap v1.27.0
-	golang.org/x/exp v0.0.0-20240604190554-fc45aab8b7f8
+	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93
 	golang.org/x/time v0.12.0
 	gopkg.in/yaml.v3 v3.0.1
 )
