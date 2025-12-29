@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,6 +26,15 @@ type Dice struct {
 	outboundHooks hookRegistry[types.MessageOutHook]
 	eventHooks    hookRegistry[types.EventHook]
 
+	// ===== 扩展注册表 =====
+	ExtRegistry        *ExtRegistry // 全局扩展注册表
+	ExtRegistryVersion atomic.Int64 // 全局版本号
+
+	// 伴随激活图（懒加载）
+	activeWithGraph   *ActiveWithGraph
+	activeWithGraphMu sync.RWMutex
+
+	// 保留用于向后兼容
 	ExtList []*types.ExtInfo
 
 	curCommandID atomic.Int64
@@ -44,6 +54,9 @@ func NewDice() *Dice {
 		CallbackForSendMsg: utils.SyncMap[string, func(msg *types.MsgToReply)]{},
 
 		masterList: utils.SyncMap[string, bool]{},
+
+		// 初始化扩展注册表
+		ExtRegistry: NewExtRegistry(),
 	}
 
 	d.attrsManager.Init()
@@ -131,6 +144,11 @@ func (d *Dice) Execute(adapterId string, msg *types.Message) (solved bool) {
 	mctx.Player = player
 
 	groupInfo.UpdatedAtTime = time.Now().Unix()
+
+	// 延迟同步扩展列表（版本追踪机制）
+	if d.NeedSyncExtensions(groupInfo) {
+		d.syncExtensionsForGroup(groupInfo)
+	}
 
 	activeExtensions := groupInfo.GetActiveExtensions(d.GetExtList())
 	groupInfo.ActivatedExtList = activeExtensions
@@ -393,4 +411,53 @@ func (d *Dice) runEventHooks(adapterID string, evt *types.AdapterEvent) {
 			continue
 		}
 	}
+}
+
+// syncExtensionsForGroup 同步群组的扩展列表
+// 当全局版本号变化时，重新解析扩展并进行依赖排序
+func (d *Dice) syncExtensionsForGroup(g *types.GroupInfo) {
+	currentVersion := d.ExtRegistryVersion.Load()
+
+	// 1. 收集已激活的扩展
+	var activeExts []*types.ExtInfo
+	if g.ExtActiveStates != nil {
+		g.ExtActiveStates.Range(func(name string, active bool) bool {
+			if active {
+				if ext := d.ExtRegistry.GetRealExt(name); ext != nil {
+					activeExts = append(activeExts, ext)
+				}
+			}
+			return true
+		})
+	}
+
+	// 2. 依赖解析和拓扑排序（如果有依赖声明）
+	sorted, err := d.ExtRegistry.ResolveWithDependencies(activeExts)
+	if err != nil {
+		// 依赖解析失败，使用原始列表（降级处理）
+		// TODO: 添加日志记录
+		sorted = activeExts
+	}
+
+	// 3. 更新群组状态
+	g.ActivatedExtList = sorted
+	g.ExtAppliedVersion = currentVersion
+	g.ExtNeedSync = false
+}
+
+// NeedSyncExtensions 检查群组是否需要同步扩展列表
+func (d *Dice) NeedSyncExtensions(g *types.GroupInfo) bool {
+	if g == nil {
+		return false
+	}
+	return g.ExtNeedSync || g.ExtAppliedVersion < d.ExtRegistryVersion.Load()
+}
+
+// MarkAllGroupsDirty 标记所有群组需要重新同步扩展
+// 通常在扩展重载后调用
+func (d *Dice) MarkAllGroupsDirty() {
+	d.GroupInfoManager.Range(func(_ string, g *types.GroupInfo) bool {
+		g.ExtNeedSync = true
+		return true
+	})
 }

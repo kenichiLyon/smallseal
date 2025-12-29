@@ -30,6 +30,22 @@ type CmdItemInfo struct {
 
 type CmdMapCls map[string]*CmdItemInfo
 
+// ExtCategory 扩展类型枚举
+type ExtCategory int
+
+const (
+	ExtCategoryCore    ExtCategory = 0 // 核心扩展(不可卸载)
+	ExtCategorySystem  ExtCategory = 1 // 规则系统(coc7/dnd5e)
+	ExtCategoryUtility ExtCategory = 2 // 工具扩展
+)
+
+// ExtDependency 依赖声明
+type ExtDependency struct {
+	Name     string `json:"name"`     // 依赖的扩展名
+	Optional bool   `json:"optional"` // 是否为可选依赖
+	MinVer   string `json:"minVer"`   // 最低版本要求
+}
+
 type ExtInfo struct {
 	Name    string   `jsbind:"name"    json:"name"    yaml:"name"` // 名字
 	Aliases []string `jsbind:"aliases" json:"aliases" yaml:"-"`    // 别名
@@ -46,6 +62,23 @@ type ExtInfo struct {
 	Author       string   `jsbind:"author" json:"-" yaml:"-"`
 	ConflictWith []string `json:"-"        yaml:"-"`
 	Official     bool     `json:"-"        yaml:"-"` // 官方插件
+
+	// ===== 伴随激活 =====
+	ActiveWith []string `jsbind:"activeWith" json:"-" yaml:"-"` // 跟随开关：当指定扩展开启或关闭时，本扩展也会同步
+
+	// ===== 依赖管理 =====
+	DependsOn []ExtDependency `json:"-" yaml:"-"` // 依赖声明列表
+	Priority  int             `json:"-" yaml:"-"` // 显式优先级(越大越优先)
+
+	// ===== 新增: Wrapper机制 =====
+	IsWrapper   bool   `json:"-" yaml:"-"` // 是否为Wrapper代理
+	IsDeleted   bool   `json:"-" yaml:"-"` // 软删除标记
+	WrappedName string `json:"-" yaml:"-"` // Wrapper指向的真实扩展名
+
+	// ===== 新增: 扩展元数据 =====
+	Category   ExtCategory `json:"-" yaml:"-"` // 扩展类型(Core/System/Utility)
+	MinVersion string      `json:"-" yaml:"-"` // 最低核心版本要求
+	LoadedAt   int64       `json:"-" yaml:"-"` // 加载时间戳(Unix时间)
 
 	// dice          *Dice
 	IsJsExt       bool  `json:"-"`
@@ -76,6 +109,7 @@ type ExtInfo struct {
 	GetDescText         func(i *ExtInfo) string                               `jsbind:"getDescText"         json:"-" yaml:"-"`
 	IsLoaded            bool                                                  `jsbind:"isLoaded"            json:"-" yaml:"-"`
 	OnLoad              func()                                                `jsbind:"onLoad"              json:"-" yaml:"-"`
+	OnUnload            func()                                                `jsbind:"onUnload"            json:"-" yaml:"-"` // 新增: 卸载回调
 
 	// OnPoke       func(ctx *MsgContext, event *events.PokeEvent)       `jsbind:"onPoke"              json:"-" yaml:"-"` // 戳一戳
 	// OnGroupLeave func(ctx *MsgContext, event *events.GroupLeaveEvent) `jsbind:"onGroupLeave"        json:"-" yaml:"-"` // 群成员被踢出

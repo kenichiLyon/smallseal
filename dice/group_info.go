@@ -13,6 +13,8 @@ type GroupInfoManager interface {
 	Store(groupId string, groupInfo *types.GroupInfo)
 	// Delete 删除群组信息
 	Delete(groupId string)
+	// Range 遍历所有群组信息
+	Range(f func(groupId string, groupInfo *types.GroupInfo) bool)
 }
 
 // DefaultGroupInfoManager 默认的群组信息管理器实现
@@ -40,4 +42,9 @@ func (m *DefaultGroupInfoManager) Store(groupId string, groupInfo *types.GroupIn
 // Delete 删除群组信息
 func (m *DefaultGroupInfoManager) Delete(groupId string) {
 	m.groupMap.Delete(groupId)
+}
+
+// Range 遍历所有群组信息
+func (m *DefaultGroupInfoManager) Range(f func(groupId string, groupInfo *types.GroupInfo) bool) {
+	m.groupMap.Range(f)
 }

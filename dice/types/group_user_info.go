@@ -50,6 +50,10 @@ type GroupInfo struct {
 	ExtActiveStates  *utils.SyncMap[string, bool]             `json:"extActiveStates"  yaml:"extActiveStates,flow"`                // 扩展激活状态映射表，key为扩展名，value为是否激活
 	Players          *utils.SyncMap[string, *GroupPlayerInfo] `json:"-"                yaml:"-"`                                   // 群员角色数据
 
+	// ===== 新增: 版本追踪 =====
+	ExtAppliedVersion int64 `json:"-" yaml:"-"` // 已同步的全局版本号
+	ExtNeedSync       bool  `json:"-" yaml:"-"` // 是否需要同步扩展列表
+
 	GroupId   string `jsbind:"groupId"       json:"groupId"      yaml:"groupId"`
 	GuildID   string `jsbind:"guildId"       json:"guildId"      yaml:"guildId"`
 	ChannelID string `jsbind:"channelId"     json:"channelId"    yaml:"channelId"`

@@ -23,6 +23,8 @@ func RegisterBuiltinExtCore(dice types.DiceLike) {
 		Author:     "SealDice-Team",
 		AutoActive: true, // 是否自动开启
 		Official:   true,
+		Category:   types.ExtCategoryCore, // 核心扩展
+		Priority:   1000,                  // 最高优先级
 	}
 
 	cmdMap := map[string]*types.CmdItemInfo{}
@@ -796,17 +798,30 @@ func RegisterBuiltinExtCore(dice types.DiceLike) {
 						ctx.Group.UpdatedAtTime = time.Now().Unix()
 
 						extNames := []string{}
+						disabledNames := []string{}
 						for _, name := range tmpl.Commands.Set.RelatedExt {
 							// 开启相关扩展
 							ei := ctx.Dice.ExtFind(name, false)
 							extNames = append(extNames, name)
 							if ei != nil {
+								// 自动禁用与该扩展冲突的扩展
+								for _, conflictName := range ei.ConflictWith {
+									if ctx.Group.IsExtensionActive(conflictName) {
+										ctx.Group.ExtInactiveByName(conflictName)
+										disabledNames = append(disabledNames, conflictName)
+									}
+								}
 								ctx.Group.ExtActive(ei)
 								ctx.Group.ActivatedExtList = ctx.Group.GetActiveExtensions(ctx.Dice.GetExtList())
 							}
 						}
 
-						ReplyToSender(ctx, msg, fmt.Sprintf("已切换至 %s(%s) 规则，默认骰子面数 %s，自动启用关联扩展: %s", tmpl.FullName, tmpl.Name, strings.ToUpper(tmpl.Commands.Set.DiceSidesExpr), strings.Join(extNames, ", ")))
+						// 构建回复消息
+						replyMsg := fmt.Sprintf("已切换至 %s(%s) 规则，默认骰子面数 %s，自动启用关联扩展: %s", tmpl.FullName, tmpl.Name, strings.ToUpper(tmpl.Commands.Set.DiceSidesExpr), strings.Join(extNames, ", "))
+						if len(disabledNames) > 0 {
+							replyMsg += fmt.Sprintf("，已自动禁用冲突扩展: %s", strings.Join(disabledNames, ", "))
+						}
+						ReplyToSender(ctx, msg, replyMsg)
 						persistGroupState()
 						found = true
 						return false
@@ -1181,11 +1196,19 @@ func RegisterBuiltinExtCore(dice types.DiceLike) {
 				}
 				var opened []string
 				var missing []string
+				var disabled []string
 				for _, raw := range cmdArgs.Args[1:] {
 					ext := ctx.Dice.ExtFind(raw, false)
 					if ext == nil {
 						missing = append(missing, raw)
 						continue
+					}
+					// 自动禁用与该扩展冲突的扩展
+					for _, conflictName := range ext.ConflictWith {
+						if ctx.Group.IsExtensionActive(conflictName) {
+							ctx.Group.ExtInactiveByName(conflictName)
+							disabled = append(disabled, conflictName)
+						}
 					}
 					ctx.Group.ExtActive(ext)
 					opened = append(opened, ext.Name)
@@ -1194,6 +1217,9 @@ func RegisterBuiltinExtCore(dice types.DiceLike) {
 				parts := []string{}
 				if len(opened) > 0 {
 					parts = append(parts, fmt.Sprintf("已开启扩展: %s", strings.Join(opened, ", ")))
+				}
+				if len(disabled) > 0 {
+					parts = append(parts, fmt.Sprintf("已自动禁用冲突扩展: %s", strings.Join(disabled, ", ")))
 				}
 				if len(missing) > 0 {
 					parts = append(parts, fmt.Sprintf("未找到: %s", strings.Join(missing, ", ")))

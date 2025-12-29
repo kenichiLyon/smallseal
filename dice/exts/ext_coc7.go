@@ -1312,6 +1312,8 @@ func RegisterBuiltinExtCoc7(theDice types.DiceLike) {
 		AutoActive: true,
 		Author:     "木落",
 		Official:   true,
+		Category:   types.ExtCategorySystem, // 规则系统扩展
+		Priority:   100,                     // 系统扩展优先级
 		ConflictWith: []string{
 			"dnd5e",
 		},

@@ -240,3 +240,7 @@ func (m *buntGroupInfoManager) Delete(groupId string) {
 		fmt.Printf("GroupInfo delete error: %v\n", err)
 	}
 }
+
+func (m *buntGroupInfoManager) Range(f func(groupId string, groupInfo *types.GroupInfo) bool) {
+	m.cache.Range(f)
+}

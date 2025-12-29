@@ -33,6 +33,10 @@ func (t *trackingGroupInfoManager) Delete(groupID string) {
 	t.inner.Delete(groupID)
 }
 
+func (t *trackingGroupInfoManager) Range(f func(groupId string, groupInfo *types.GroupInfo) bool) {
+	t.inner.Range(f)
+}
+
 func TestBotOffDisablesGroupCommands(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
