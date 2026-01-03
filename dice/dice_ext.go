@@ -218,3 +218,93 @@ func (d *Dice) ExtFind(s string, fromJS bool) *types.ExtInfo {
 func (d *Dice) GetExtList() []*types.ExtInfo {
 	return d.ExtList
 }
+
+// ExtActiveForGroup 启用扩展（带依赖检查和 ActiveWith 联动）
+// 返回值：联动开启的扩展名列表、依赖缺失的扩展名列表
+func (d *Dice) ExtActiveForGroup(g *types.GroupInfo, ext *types.ExtInfo) (followed []string, missingDeps []string) {
+	if g == nil || ext == nil {
+		return nil, nil
+	}
+
+	// 1. 检查依赖是否满足
+	for _, dep := range ext.DependsOn {
+		depExt := d.ExtFind(dep.Name, false)
+		if depExt == nil {
+			if !dep.Optional {
+				missingDeps = append(missingDeps, dep.Name)
+			}
+			continue
+		}
+		// 依赖存在但未激活，自动激活依赖
+		if !g.IsExtensionActive(dep.Name) {
+			g.ExtActive(depExt)
+			followed = append(followed, dep.Name)
+		}
+	}
+
+	// 如果有必需依赖缺失，不继续启用
+	if len(missingDeps) > 0 {
+		return followed, missingDeps
+	}
+
+	// 2. 启用扩展本身
+	g.ExtActive(ext)
+
+	// 3. 触发 ActiveWith 联动（找到所有跟随此扩展的扩展）
+	followers := d.GetFollowerExtensions(ext.Name)
+	for _, follower := range followers {
+		if !g.IsExtensionActive(follower.Name) {
+			g.ExtActive(follower)
+			followed = append(followed, follower.Name)
+		}
+	}
+
+	return followed, nil
+}
+
+// ExtInactiveForGroup 禁用扩展（带 ActiveWith 联动）
+// 返回值：联动关闭的扩展名列表
+func (d *Dice) ExtInactiveForGroup(g *types.GroupInfo, name string) (followed []string) {
+	if g == nil || name == "" {
+		return nil
+	}
+
+	// 1. 禁用扩展本身
+	g.ExtInactiveByName(name)
+
+	// 2. 触发 ActiveWith 联动（关闭所有跟随此扩展的扩展）
+	followers := d.GetFollowerExtensions(name)
+	for _, follower := range followers {
+		if g.IsExtensionActive(follower.Name) {
+			g.ExtInactiveByName(follower.Name)
+			followed = append(followed, follower.Name)
+		}
+	}
+
+	return followed
+}
+
+// checkExtensionDependencies 检查扩展的依赖是否都已激活
+// 返回未激活的必需依赖列表
+func (d *Dice) checkExtensionDependencies(g *types.GroupInfo, ext *types.ExtInfo) []string {
+	if g == nil || ext == nil || len(ext.DependsOn) == 0 {
+		return nil
+	}
+
+	var missing []string
+	for _, dep := range ext.DependsOn {
+		if dep.Optional {
+			continue // 跳过可选依赖
+		}
+		// 检查依赖扩展是否存在且已激活
+		depExt := d.ExtFind(dep.Name, false)
+		if depExt == nil {
+			missing = append(missing, dep.Name)
+			continue
+		}
+		if !g.IsExtensionActive(dep.Name) {
+			missing = append(missing, dep.Name)
+		}
+	}
+	return missing
+}

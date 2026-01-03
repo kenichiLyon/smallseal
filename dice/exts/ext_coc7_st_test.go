@@ -87,6 +87,20 @@ func (s *stubDice) IsMaster(string) bool { return false }
 
 func (s *stubDice) PersistGroupInfo(string, *types.GroupInfo) {}
 
+func (s *stubDice) ExtActiveForGroup(g *types.GroupInfo, ext *types.ExtInfo) ([]string, []string) {
+	if g != nil && ext != nil {
+		g.ExtActive(ext)
+	}
+	return nil, nil
+}
+
+func (s *stubDice) ExtInactiveForGroup(g *types.GroupInfo, name string) []string {
+	if g != nil {
+		g.ExtInactiveByName(name)
+	}
+	return nil
+}
+
 func minimalTextMap() types.TextTemplateWithWeightDict {
 	toItem := func(text string) types.TextTemplateItem {
 		return types.TextTemplateItem{text, 1}

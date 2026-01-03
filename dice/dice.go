@@ -148,10 +148,13 @@ func (d *Dice) Execute(adapterId string, msg *types.Message) (solved bool) {
 	// 延迟同步扩展列表（版本追踪机制）
 	if d.NeedSyncExtensions(groupInfo) {
 		d.syncExtensionsForGroup(groupInfo)
+		// syncExtensionsForGroup 已经设置了 ActivatedExtList（含依赖排序），无需再次获取
+	} else {
+		// 只有在没有 sync 的情况下才重新获取
+		groupInfo.ActivatedExtList = groupInfo.GetActiveExtensions(d.GetExtList())
 	}
 
-	activeExtensions := groupInfo.GetActiveExtensions(d.GetExtList())
-	groupInfo.ActivatedExtList = activeExtensions
+	activeExtensions := groupInfo.ActivatedExtList
 
 	if d.runMessageInHooks(adapterId, msg, mctx) {
 		return
@@ -221,6 +224,13 @@ func (d *Dice) Execute(adapterId string, msg *types.Message) (solved bool) {
 		if cmdArgs != nil && !solved {
 			if cmd, ok := i.CmdMap[cmdArgs.Command]; ok {
 				if !groupActive && !allowWhenInactive(cmd) {
+					continue
+				}
+				// 检查扩展的依赖是否都已激活
+				if missingDeps := d.checkExtensionDependencies(mctx.Group, i); len(missingDeps) > 0 {
+					exts.ReplyToSender(mctx, msg, fmt.Sprintf("扩展 %s 需要先启用依赖: %s\n请使用 .ext on %s",
+						i.Name, strings.Join(missingDeps, ", "), strings.Join(missingDeps, " ")))
+					solved = true
 					continue
 				}
 				result := cmd.Solve(mctx, msg, cmdArgs)

@@ -1197,6 +1197,8 @@ func RegisterBuiltinExtCore(dice types.DiceLike) {
 				var opened []string
 				var missing []string
 				var disabled []string
+				var followed []string
+				var depMissing []string
 				for _, raw := range cmdArgs.Args[1:] {
 					ext := ctx.Dice.ExtFind(raw, false)
 					if ext == nil {
@@ -1210,16 +1212,28 @@ func RegisterBuiltinExtCore(dice types.DiceLike) {
 							disabled = append(disabled, conflictName)
 						}
 					}
-					ctx.Group.ExtActive(ext)
+					// 使用带联动的启用方法
+					followedExts, missingDeps := ctx.Dice.ExtActiveForGroup(ctx.Group, ext)
+					if len(missingDeps) > 0 {
+						depMissing = append(depMissing, fmt.Sprintf("%s(缺少依赖: %s)", ext.Name, strings.Join(missingDeps, ", ")))
+						continue
+					}
 					opened = append(opened, ext.Name)
+					followed = append(followed, followedExts...)
 				}
 				ctx.Group.ActivatedExtList = ctx.Group.GetActiveExtensions(ctx.Dice.GetExtList())
 				parts := []string{}
 				if len(opened) > 0 {
 					parts = append(parts, fmt.Sprintf("已开启扩展: %s", strings.Join(opened, ", ")))
 				}
+				if len(followed) > 0 {
+					parts = append(parts, fmt.Sprintf("联动开启: %s", strings.Join(followed, ", ")))
+				}
 				if len(disabled) > 0 {
 					parts = append(parts, fmt.Sprintf("已自动禁用冲突扩展: %s", strings.Join(disabled, ", ")))
+				}
+				if len(depMissing) > 0 {
+					parts = append(parts, fmt.Sprintf("依赖缺失: %s", strings.Join(depMissing, ", ")))
 				}
 				if len(missing) > 0 {
 					parts = append(parts, fmt.Sprintf("未找到: %s", strings.Join(missing, ", ")))
@@ -1232,30 +1246,37 @@ func RegisterBuiltinExtCore(dice types.DiceLike) {
 				}
 				var closed []string
 				var failed []string
+				var followed []string
 				for _, raw := range cmdArgs.Args[1:] {
 					if strings.EqualFold(raw, "core") {
 						failed = append(failed, raw)
 						continue
 					}
-					removed := ctx.Group.ExtInactiveByName(raw)
-					if removed == nil {
-						ext := ctx.Dice.ExtFind(raw, false)
-						if ext == nil || strings.EqualFold(ext.Name, "core") {
-							failed = append(failed, raw)
-							continue
-						}
-						removed = ctx.Group.ExtInactiveByName(ext.Name)
-					}
-					if removed != nil {
-						closed = append(closed, removed.Name)
-					} else {
+					ext := ctx.Dice.ExtFind(raw, false)
+					if ext == nil {
 						failed = append(failed, raw)
+						continue
 					}
+					if strings.EqualFold(ext.Name, "core") {
+						failed = append(failed, raw)
+						continue
+					}
+					if !ctx.Group.IsExtensionActive(ext.Name) {
+						failed = append(failed, raw)
+						continue
+					}
+					// 使用带联动的禁用方法
+					followedExts := ctx.Dice.ExtInactiveForGroup(ctx.Group, ext.Name)
+					closed = append(closed, ext.Name)
+					followed = append(followed, followedExts...)
 				}
 				ctx.Group.ActivatedExtList = ctx.Group.GetActiveExtensions(ctx.Dice.GetExtList())
 				parts := []string{}
 				if len(closed) > 0 {
 					parts = append(parts, fmt.Sprintf("已关闭扩展: %s", strings.Join(closed, ", ")))
+				}
+				if len(followed) > 0 {
+					parts = append(parts, fmt.Sprintf("联动关闭: %s", strings.Join(followed, ", ")))
 				}
 				if len(failed) > 0 {
 					parts = append(parts, fmt.Sprintf("未找到或不可关闭: %s", strings.Join(failed, ", ")))

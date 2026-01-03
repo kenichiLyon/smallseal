@@ -17,6 +17,10 @@ type DiceLike interface {
 	PersistGroupInfo(groupID string, info *GroupInfo)
 	SendReply(msg *MsgToReply)
 
+	// 扩展启用/禁用（带依赖检查和 ActiveWith 联动）
+	ExtActiveForGroup(g *GroupInfo, ext *ExtInfo) (followed []string, missingDeps []string)
+	ExtInactiveForGroup(g *GroupInfo, name string) (followed []string)
+
 	RegisterMessageInHook(name string, priority HookPriority, hook MessageInHook) (HookHandle, error)
 	UnregisterMessageInHook(handle HookHandle) bool
 

@@ -690,3 +690,260 @@ func TestGetPriority_Nil(t *testing.T) {
 		t.Errorf("expected negative priority for nil, got %d", p)
 	}
 }
+
+// ========== Dependency Validation Tests ==========
+
+func TestValidateDependencies_NoDependencies(t *testing.T) {
+	reg := NewExtRegistry()
+	ext := &types.ExtInfo{Name: "standalone"}
+
+	err := reg.ValidateDependencies(ext)
+	if err != nil {
+		t.Fatalf("expected no error for extension without dependencies, got: %v", err)
+	}
+}
+
+func TestValidateDependencies_MissingRequired(t *testing.T) {
+	reg := NewExtRegistry()
+
+	// 扩展 B 依赖 A，但 A 没有注册
+	extB := &types.ExtInfo{
+		Name: "plugin-b",
+		DependsOn: []types.ExtDependency{
+			{Name: "plugin-a", Optional: false},
+		},
+	}
+
+	err := reg.ValidateDependencies(extB)
+	if err == nil {
+		t.Fatal("expected error for missing required dependency")
+	}
+	if !strings.Contains(err.Error(), "plugin-a") {
+		t.Fatalf("error should mention missing dependency name, got: %v", err)
+	}
+}
+
+func TestValidateDependencies_MissingMultiple(t *testing.T) {
+	reg := NewExtRegistry()
+
+	// 扩展 C 依赖 A 和 B，都没有注册
+	extC := &types.ExtInfo{
+		Name: "plugin-c",
+		DependsOn: []types.ExtDependency{
+			{Name: "plugin-a", Optional: false},
+			{Name: "plugin-b", Optional: false},
+		},
+	}
+
+	err := reg.ValidateDependencies(extC)
+	if err == nil {
+		t.Fatal("expected error for missing dependencies")
+	}
+	// 第一个缺失的依赖会触发错误
+	if !strings.Contains(err.Error(), "plugin-a") {
+		t.Fatalf("error should mention first missing dependency, got: %v", err)
+	}
+}
+
+func TestValidateDependencies_OptionalMissing(t *testing.T) {
+	reg := NewExtRegistry()
+
+	// 扩展 B 可选依赖 A，A 没有注册应该不报错
+	extB := &types.ExtInfo{
+		Name: "plugin-b",
+		DependsOn: []types.ExtDependency{
+			{Name: "plugin-a", Optional: true},
+		},
+	}
+
+	err := reg.ValidateDependencies(extB)
+	if err != nil {
+		t.Fatalf("expected no error for missing optional dependency, got: %v", err)
+	}
+}
+
+func TestValidateDependencies_RequiredPresent(t *testing.T) {
+	reg := NewExtRegistry()
+
+	// 先注册依赖
+	extA := &types.ExtInfo{Name: "plugin-a"}
+	_ = reg.Register(extA)
+
+	// 扩展 B 依赖 A
+	extB := &types.ExtInfo{
+		Name: "plugin-b",
+		DependsOn: []types.ExtDependency{
+			{Name: "plugin-a", Optional: false},
+		},
+	}
+
+	err := reg.ValidateDependencies(extB)
+	if err != nil {
+		t.Fatalf("expected no error when dependency is present, got: %v", err)
+	}
+}
+
+func TestValidateDependencies_ChainedDependencies(t *testing.T) {
+	reg := NewExtRegistry()
+
+	// A <- B <- C 的依赖链
+	extA := &types.ExtInfo{Name: "plugin-a"}
+	extB := &types.ExtInfo{
+		Name: "plugin-b",
+		DependsOn: []types.ExtDependency{
+			{Name: "plugin-a", Optional: false},
+		},
+	}
+	extC := &types.ExtInfo{
+		Name: "plugin-c",
+		DependsOn: []types.ExtDependency{
+			{Name: "plugin-b", Optional: false},
+		},
+	}
+
+	_ = reg.Register(extA)
+	_ = reg.Register(extB)
+
+	// C 依赖 B，B 已注册，应该通过
+	err := reg.ValidateDependencies(extC)
+	if err != nil {
+		t.Fatalf("expected no error for chained dependencies, got: %v", err)
+	}
+}
+
+// ========== ResolveWithDependencies Tests ==========
+
+func TestResolveWithDependencies_SimpleChain(t *testing.T) {
+	reg := NewExtRegistry()
+
+	// A <- B <- C
+	extA := &types.ExtInfo{Name: "a", Category: types.ExtCategoryCore}
+	extB := &types.ExtInfo{
+		Name:      "b",
+		Category:  types.ExtCategorySystem,
+		DependsOn: []types.ExtDependency{{Name: "a"}},
+	}
+	extC := &types.ExtInfo{
+		Name:      "c",
+		Category:  types.ExtCategoryUtility,
+		DependsOn: []types.ExtDependency{{Name: "b"}},
+	}
+
+	_ = reg.Register(extA)
+	_ = reg.Register(extB)
+	_ = reg.Register(extC)
+
+	sorted, err := reg.ResolveWithDependencies([]*types.ExtInfo{extC, extB, extA})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 期望顺序: a, b, c（依赖在前）
+	if len(sorted) != 3 {
+		t.Fatalf("expected 3 extensions, got %d", len(sorted))
+	}
+	if sorted[0].Name != "a" || sorted[1].Name != "b" || sorted[2].Name != "c" {
+		names := make([]string, len(sorted))
+		for i, e := range sorted {
+			names[i] = e.Name
+		}
+		t.Fatalf("expected order [a, b, c], got %v", names)
+	}
+}
+
+func TestResolveWithDependencies_CircularDependency(t *testing.T) {
+	reg := NewExtRegistry()
+
+	// A <- B, B <- A (循环依赖)
+	extA := &types.ExtInfo{
+		Name:      "a",
+		DependsOn: []types.ExtDependency{{Name: "b"}},
+	}
+	extB := &types.ExtInfo{
+		Name:      "b",
+		DependsOn: []types.ExtDependency{{Name: "a"}},
+	}
+
+	_ = reg.Register(extA)
+	_ = reg.Register(extB)
+
+	_, err := reg.ResolveWithDependencies([]*types.ExtInfo{extA, extB})
+	if err == nil {
+		t.Fatal("expected error for circular dependency")
+	}
+	if !strings.Contains(err.Error(), "circular") {
+		t.Fatalf("error should mention circular dependency, got: %v", err)
+	}
+}
+
+func TestResolveWithDependencies_MissingDependency(t *testing.T) {
+	reg := NewExtRegistry()
+
+	// B 依赖 A，但 A 没有注册
+	extB := &types.ExtInfo{
+		Name:      "b",
+		DependsOn: []types.ExtDependency{{Name: "a", Optional: false}},
+	}
+
+	_, err := reg.ResolveWithDependencies([]*types.ExtInfo{extB})
+	if err == nil {
+		t.Fatal("expected error for missing dependency")
+	}
+	if !strings.Contains(err.Error(), "a") {
+		t.Fatalf("error should mention missing dependency, got: %v", err)
+	}
+}
+
+func TestResolveWithDependencies_OptionalMissing(t *testing.T) {
+	reg := NewExtRegistry()
+
+	// B 可选依赖 A
+	extB := &types.ExtInfo{
+		Name:      "b",
+		DependsOn: []types.ExtDependency{{Name: "a", Optional: true}},
+	}
+
+	sorted, err := reg.ResolveWithDependencies([]*types.ExtInfo{extB})
+	if err != nil {
+		t.Fatalf("expected no error for missing optional dependency, got: %v", err)
+	}
+	if len(sorted) != 1 || sorted[0].Name != "b" {
+		t.Fatalf("expected [b], got %v", sorted)
+	}
+}
+
+// ========== GetActiveDependencies Tests ==========
+
+func TestGetActiveDependencies_Recursive(t *testing.T) {
+	reg := NewExtRegistry()
+
+	// A <- B <- C (C 依赖 B，B 依赖 A)
+	extA := &types.ExtInfo{Name: "a"}
+	extB := &types.ExtInfo{
+		Name:      "b",
+		DependsOn: []types.ExtDependency{{Name: "a"}},
+	}
+	extC := &types.ExtInfo{
+		Name:      "c",
+		DependsOn: []types.ExtDependency{{Name: "b"}},
+	}
+
+	_ = reg.Register(extA)
+	_ = reg.Register(extB)
+	_ = reg.Register(extC)
+
+	deps := reg.GetActiveDependencies("c")
+
+	// C 的依赖应该包括 B 和 A（递归收集）
+	if len(deps) != 2 {
+		t.Fatalf("expected 2 dependencies, got %d", len(deps))
+	}
+
+	names := make(map[string]bool)
+	for _, d := range deps {
+		names[d.Name] = true
+	}
+	if !names["a"] || !names["b"] {
+		t.Fatalf("expected dependencies [a, b], got %v", names)
+	}
+}
