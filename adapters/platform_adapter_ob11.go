@@ -46,7 +46,11 @@ type PlatformAdapterOB11 struct {
 	eventSession atomic.Pointer[ob11Session]
 
 	requestSeq atomic.Uint64
-	pending    sync.Map // map[string]chan ob11APIResponse
+	echoWaiter ob11EchoWaiter
+
+	lifecycleMu sync.Mutex
+	serveCancel context.CancelFunc
+	dispatcher  *ob11EventDispatcher
 
 	forwardServer *http.Server
 }
@@ -96,17 +100,45 @@ func (pa *PlatformAdapterOB11) Serve(ctx context.Context) {
 		return
 	}
 
+	runCtx, cancel := context.WithCancel(ctx)
+	pa.lifecycleMu.Lock()
+	if pa.serveCancel != nil {
+		pa.serveCancel()
+	}
+	pa.serveCancel = cancel
+	oldDispatcher := pa.dispatcher
+	pa.dispatcher = newOB11EventDispatcher(runCtx, ob11DispatchWorkerCount, ob11DispatchQueueSize, func(job ob11DispatchJob) {
+		if err := pa.handleDispatchedFrame(job.postType, job.payload); err != nil {
+			zap.S().Named("adapter").Debugf("ob11 dispatched frame failed: %v", err)
+		}
+	})
+	pa.lifecycleMu.Unlock()
+	oldDispatcher.wait()
+
 	if pa.WSReverseURL != "" {
-		go pa.loopReverse(ctx)
+		go pa.loopReverse(runCtx)
 	}
 
 	if pa.WSForwardAddr != "" {
-		go pa.listenForward(ctx)
+		go pa.listenForward(runCtx)
 	}
 }
 
 // Close shuts down active sessions and forward server if any.
 func (pa *PlatformAdapterOB11) Close() {
+	pa.lifecycleMu.Lock()
+	cancel := pa.serveCancel
+	pa.serveCancel = nil
+	dispatcher := pa.dispatcher
+	pa.dispatcher = nil
+	pa.lifecycleMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if dispatcher != nil {
+		dispatcher.wait()
+	}
+
 	if srv := pa.forwardServer; srv != nil {
 		_ = srv.Shutdown(context.Background())
 	}
@@ -134,7 +166,11 @@ func (pa *PlatformAdapterOB11) loopReverse(ctx context.Context) {
 			return
 		}
 
-		if err := pa.connectReverse(ctx); err != nil {
+		connected, err := pa.connectReverse(ctx)
+		if connected {
+			backoff = time.Second
+		}
+		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				log.Warnf("ob11 reverse ws connect failed: %v", err)
 			}
@@ -150,13 +186,13 @@ func (pa *PlatformAdapterOB11) loopReverse(ctx context.Context) {
 		case <-time.After(backoff):
 		}
 
-		if backoff < 30*time.Second {
+		if !connected && backoff < 30*time.Second {
 			backoff *= 2
 		}
 	}
 }
 
-func (pa *PlatformAdapterOB11) connectReverse(ctx context.Context) error {
+func (pa *PlatformAdapterOB11) connectReverse(ctx context.Context) (connected bool, retErr error) {
 	header := http.Header{}
 	if pa.AccessToken != "" {
 		header.Set("Authorization", "Bearer "+pa.AccessToken)
@@ -167,13 +203,17 @@ func (pa *PlatformAdapterOB11) connectReverse(ctx context.Context) error {
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, pa.WSReverseURL, header)
 	if err != nil {
-		return err
+		return false, err
 	}
+	connected = true
 	session := newOB11Session(conn, roleUnified)
 	pa.setSession(session)
-	defer pa.clearSession(session, err)
+	defer func() {
+		pa.clearSession(session, retErr)
+	}()
 
-	return pa.consumeSession(ctx, session)
+	retErr = pa.consumeSession(ctx, session)
+	return connected, retErr
 }
 
 func (pa *PlatformAdapterOB11) listenForward(ctx context.Context) {
@@ -208,10 +248,11 @@ func (pa *PlatformAdapterOB11) listenForward(ctx context.Context) {
 
 		session := newOB11Session(conn, role)
 		pa.setSession(session)
-		defer pa.clearSession(session, nil)
 
-		if err := pa.consumeSession(ctx, session); err != nil && !errors.Is(err, context.Canceled) {
-			log.Debugf("ob11 forward ws closed: %v", err)
+		consumeErr := pa.consumeSession(ctx, session)
+		pa.clearSession(session, consumeErr)
+		if consumeErr != nil && !errors.Is(consumeErr, context.Canceled) {
+			log.Debugf("ob11 forward ws closed: %v", consumeErr)
 		}
 	})
 
@@ -264,16 +305,16 @@ func (pa *PlatformAdapterOB11) consumeSession(ctx context.Context, session *ob11
 			return err
 		}
 
-		// 异步处理消息，避免阻塞WebSocket读取
-		go func(data []byte) {
-			if err := pa.dispatchFrame(data); err != nil {
-				log.Debugf("ob11 frame dispatch failed: %v", err)
+		if err := pa.dispatchFrame(ctx, payload); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
 			}
-		}(payload)
+			log.Debugf("ob11 frame dispatch failed: %v", err)
+		}
 	}
 }
 
-func (pa *PlatformAdapterOB11) dispatchFrame(payload []byte) error {
+func (pa *PlatformAdapterOB11) dispatchFrame(ctx context.Context, payload []byte) error {
 	log := zap.S().Named("adapter")
 
 	var base ob11BaseFrame
@@ -282,25 +323,32 @@ func (pa *PlatformAdapterOB11) dispatchFrame(payload []byte) error {
 	}
 
 	if len(base.Echo) != 0 {
-		echo := sanitizeRawMessage(base.Echo)
-		if chVal, ok := pa.pending.LoadAndDelete(echo); ok {
-			var resp ob11APIResponse
-			if err := json.Unmarshal(payload, &resp); err != nil {
-				resp = ob11APIResponse{Status: "failed", Message: err.Error(), Echo: base.Echo}
-			}
-
-			ch := chVal.(chan ob11APIResponse)
-			select {
-			case ch <- resp:
-			default:
-			}
+		if !pa.echoWaiter.resolve(base.Echo, payload) {
+			log.Debugf("ob11: dropped echo response echo=%s", sanitizeRawMessage(base.Echo))
 		}
 		return nil
 	}
 
-	if base.PostType != "message" {
+	if base.PostType == "" {
+		log.Debug("ob11: ignore frame without post_type and echo")
+		return nil
+	}
+
+	pa.lifecycleMu.Lock()
+	dispatcher := pa.dispatcher
+	pa.lifecycleMu.Unlock()
+	if dispatcher == nil {
+		return errors.New("ob11 adapter: dispatcher not initialized")
+	}
+	return dispatcher.submit(ctx, ob11DispatchJob{postType: base.PostType, payload: payload})
+}
+
+func (pa *PlatformAdapterOB11) handleDispatchedFrame(postType string, payload []byte) error {
+	log := zap.S().Named("adapter")
+
+	if postType != "message" {
 		if pa.callback != nil {
-			evt, err := pa.convertFrameToEvent(base.PostType, payload)
+			evt, err := pa.convertFrameToEvent(postType, payload)
 			if err != nil {
 				log.Debugf("ob11 event dispatch failed: %v", err)
 				pa.callback.OnError(err)
@@ -473,19 +521,7 @@ func (pa *PlatformAdapterOB11) clearSession(session *ob11Session, cause error) {
 }
 
 func (pa *PlatformAdapterOB11) failPending(err error) {
-	pa.pending.Range(func(key, value any) bool {
-		ch := value.(chan ob11APIResponse)
-		resp := ob11APIResponse{
-			Status:  "failed",
-			Message: err.Error(),
-		}
-		select {
-		case ch <- resp:
-		default:
-		}
-		pa.pending.Delete(key)
-		return true
-	})
+	pa.echoWaiter.failAll(err)
 }
 
 func (pa *PlatformAdapterOB11) callAction(ctx context.Context, action string, params map[string]any, out any) error {
@@ -502,11 +538,7 @@ func (pa *PlatformAdapterOB11) callAction(ctx context.Context, action string, pa
 	randomValue, _ := rand.Int(rand.Reader, big.NewInt(1<<32)) // 32位随机数
 	randomStr := randomValue.Text(62)                          // 转换为62进制（最高进制）
 	echo := fmt.Sprintf("seal-%s-%d", randomStr, pa.requestSeq.Add(1))
-	respCh := make(chan ob11APIResponse, 1)
-	// 存储echo时需要考虑JSON序列化后的格式
-	echoJSON, _ := json.Marshal(echo)
-	echoKey := sanitizeRawMessage(echoJSON)
-	pa.pending.Store(echoKey, respCh)
+	respCh := pa.echoWaiter.register(echo)
 
 	payload := map[string]any{
 		"action": action,
@@ -515,22 +547,29 @@ func (pa *PlatformAdapterOB11) callAction(ctx context.Context, action string, pa
 	}
 
 	if err := session.writeJSON(payload); err != nil {
-		pa.pending.Delete(echoKey)
+		pa.echoWaiter.cancel(echo)
 		return err
 	}
 
 	select {
 	case <-ctx.Done():
-		pa.pending.Delete(echoKey)
+		pa.echoWaiter.cancel(echo)
 		return ctx.Err()
 	case <-time.After(actionTimeout):
-		pa.pending.Delete(echoKey)
+		pa.echoWaiter.cancel(echo)
 		return errors.New("ob11 adapter: action timeout")
 	case resp := <-respCh:
 
 		if resp.Status != "ok" {
-			if resp.Message != "" {
-				return fmt.Errorf("ob11 adapter: %s", resp.Message)
+			reason := strings.TrimSpace(resp.Message)
+			wording := strings.TrimSpace(resp.Wording)
+			if reason == "" {
+				reason = wording
+			} else if wording != "" && wording != reason {
+				reason = reason + ": " + wording
+			}
+			if reason != "" {
+				return fmt.Errorf("ob11 adapter: %s", reason)
 			}
 			return fmt.Errorf("ob11 adapter: retcode=%d", resp.RetCode)
 		}
@@ -560,17 +599,19 @@ func (pa *PlatformAdapterOB11) MsgSendToGroup(request *MessageSendRequest) (bool
 		return false, err
 	}
 
-	params := map[string]any{
-		"group_id": gid,
-		"message":  pa.buildMessage(request.Segments),
+	targetID := FormatDiceIDQQGroup(strconv.FormatInt(gid, 10))
+	sentSegments, rawID, err := pa.sendSegmentsWithPoke(context.Background(), ob11SendConfig{
+		messageAction: "send_group_msg",
+		pokeAction:    "group_poke",
+		targetParam:   "group_id",
+		targetID:      gid,
+	}, request.Segments)
+	if len(sentSegments) > 0 {
+		pa.emitEcho(sentSegments, request.Sender, "group", targetID, rawID)
 	}
-
-	var resp ob11SendResponse
-	if err := pa.callAction(context.Background(), "send_group_msg", params, &resp); err != nil {
+	if err != nil {
 		return false, err
 	}
-
-	pa.emitEcho(request.Segments, request.Sender, "group", FormatDiceIDQQGroup(strconv.FormatInt(gid, 10)), sanitizeRawMessage(resp.MessageID))
 	return true, nil
 }
 
@@ -581,17 +622,19 @@ func (pa *PlatformAdapterOB11) MsgSendToPerson(request *MessageSendRequest) (boo
 		return false, err
 	}
 
-	params := map[string]any{
-		"user_id": uid,
-		"message": pa.buildMessage(request.Segments),
+	targetID := FormatDiceIDQQ(strconv.FormatInt(uid, 10))
+	sentSegments, rawID, err := pa.sendSegmentsWithPoke(context.Background(), ob11SendConfig{
+		messageAction: "send_private_msg",
+		pokeAction:    "friend_poke",
+		targetParam:   "user_id",
+		targetID:      uid,
+	}, request.Segments)
+	if len(sentSegments) > 0 {
+		pa.emitEcho(sentSegments, request.Sender, "private", targetID, rawID)
 	}
-
-	var resp ob11SendResponse
-	if err := pa.callAction(context.Background(), "send_private_msg", params, &resp); err != nil {
+	if err != nil {
 		return false, err
 	}
-
-	pa.emitEcho(request.Segments, request.Sender, "private", FormatDiceIDQQ(strconv.FormatInt(uid, 10)), sanitizeRawMessage(resp.MessageID))
 	return true, nil
 }
 
@@ -819,46 +862,78 @@ func (pa *PlatformAdapterOB11) extractSegments(raw json.RawMessage) types.Messag
 func (pa *PlatformAdapterOB11) fromSegments(src []ob11Segment) types.MessageSegments {
 	var result types.MessageSegments
 	for _, seg := range src {
-		switch seg.Type {
-		case "text":
-			if text, ok := seg.Data["text"].(string); ok {
-				result = append(result, &types.TextElement{Content: text})
-			}
-		case "image":
-			if file, ok := seg.Data["file"].(string); ok {
-				result = append(result, &types.ImageElement{URL: file})
-			}
-		case "at":
-			switch qq := seg.Data["qq"].(type) {
-			case string:
-				result = append(result, &types.AtElement{Target: qq})
-			case float64:
-				result = append(result, &types.AtElement{Target: strconv.FormatInt(int64(qq), 10)})
-			}
-		case "face":
-			if id, ok := seg.Data["id"].(string); ok {
-				result = append(result, &types.FaceElement{FaceID: id})
-			}
-		case "reply":
-			reply := &types.ReplyElement{}
-			if id, ok := seg.Data["id"].(string); ok {
-				reply.ReplySeq = id
-			}
-			if text, ok := seg.Data["text"].(string); ok {
-				reply.Elements = append(reply.Elements, &types.TextElement{Content: text})
-			}
-			result = append(result, reply)
-		case "record":
-			if file, ok := seg.Data["file"].(string); ok {
-				result = append(result, &types.RecordElement{File: &types.FileElement{URL: file}})
-			}
-		case "poke":
-			if target, ok := seg.Data["id"].(string); ok {
-				result = append(result, &types.PokeElement{Target: target})
-			}
+		if elem := ob11SegmentToElement(seg); elem != nil {
+			result = append(result, elem)
 		}
 	}
 	return result
+}
+
+type ob11SendConfig struct {
+	messageAction string
+	pokeAction    string
+	targetParam   string
+	targetID      int64
+}
+
+func (pa *PlatformAdapterOB11) sendSegmentsWithPoke(ctx context.Context, cfg ob11SendConfig, segments []types.IMessageElement) ([]types.IMessageElement, string, error) {
+	sentSegments := make([]types.IMessageElement, 0, len(segments))
+	pending := make([]types.IMessageElement, 0, len(segments))
+	var lastRawID string
+
+	flushPending := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		payload := pa.buildMessage(pending)
+		pendingSegments := pending
+		pending = nil
+		if len(payload) == 0 {
+			return nil
+		}
+		params := map[string]any{cfg.targetParam: cfg.targetID, "message": payload}
+		var resp ob11SendResponse
+		if err := pa.callAction(ctx, cfg.messageAction, params, &resp); err != nil {
+			return err
+		}
+		lastRawID = sanitizeRawMessage(resp.MessageID)
+		sentSegments = append(sentSegments, pendingSegments...)
+		return nil
+	}
+
+	for _, elem := range segments {
+		poke, ok := elem.(*types.PokeElement)
+		if !ok {
+			pending = append(pending, elem)
+			continue
+		}
+		if err := flushPending(); err != nil {
+			return sentSegments, lastRawID, err
+		}
+		if strings.TrimSpace(poke.Target) == "" {
+			continue
+		}
+		pokeTarget, err := parseInt64(poke.Target)
+		if err != nil {
+			return sentSegments, lastRawID, err
+		}
+		params := map[string]any{"user_id": pokeTarget}
+		if cfg.pokeAction == "group_poke" {
+			params[cfg.targetParam] = cfg.targetID
+		}
+		if err := pa.callAction(ctx, cfg.pokeAction, params, nil); err != nil {
+			return sentSegments, lastRawID, err
+		}
+		sentSegments = append(sentSegments, &types.PokeElement{Target: poke.Target})
+	}
+	if err := flushPending(); err != nil {
+		return sentSegments, lastRawID, err
+	}
+
+	if len(sentSegments) == 0 && len(segments) > 0 {
+		return nil, "", errors.New("ob11 adapter: no supported segments to send")
+	}
+	return sentSegments, lastRawID, nil
 }
 
 func (pa *PlatformAdapterOB11) buildMessage(segments []types.IMessageElement) []map[string]any {
@@ -918,10 +993,7 @@ func (pa *PlatformAdapterOB11) buildMessage(segments []types.IMessageElement) []
 				"data": map[string]any{"id": e.FaceID},
 			})
 		case *types.PokeElement:
-			result = append(result, map[string]any{
-				"type": "poke",
-				"data": map[string]any{"id": e.Target},
-			})
+			log.Debugf("ob11: poke segment is sent via dedicated action, skip inline serialization target=%s", e.Target)
 		default:
 			log.Debugf("ob11: unsupported segment type %T", elem)
 		}
@@ -967,20 +1039,7 @@ func (pa *PlatformAdapterOB11) emitEcho(segs []types.IMessageElement, sender *Si
 }
 
 func formatAnyID(id any) string {
-	switch v := id.(type) {
-	case string:
-		return v
-	case int:
-		return strconv.Itoa(v)
-	case int64:
-		return strconv.FormatInt(v, 10)
-	case uint64:
-		return strconv.FormatUint(v, 10)
-	case json.Number:
-		return v.String()
-	default:
-		return fmt.Sprintf("%v", v)
-	}
+	return stringFromAny(id)
 }
 
 func parseInt64(value string) (int64, error) {
@@ -1000,16 +1059,105 @@ func sanitizeRawMessage(raw json.RawMessage) string {
 	return s
 }
 
+func stringFromAny(value any) string {
+	if value == nil {
+		return ""
+	}
+	if v, ok := value.(string); ok {
+		return v
+	}
+	if v, ok := value.(json.Number); ok {
+		return v.String()
+	}
+	return fmt.Sprint(value)
+}
+
+func segmentDataString(data map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := data[key]; ok {
+			if str := strings.TrimSpace(stringFromAny(value)); str != "" {
+				return str
+			}
+		}
+	}
+	return ""
+}
+
+func segmentDataStringMap(data map[string]any) map[string]string {
+	if len(data) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(data))
+	for key, value := range data {
+		result[key] = stringFromAny(value)
+	}
+	return result
+}
+
+func chooseOB11MediaSource(data map[string]any) string {
+	file := segmentDataString(data, "file")
+	urlValue := segmentDataString(data, "url")
+	pathValue := segmentDataString(data, "path")
+	return chooseOB11MediaSourceValues(file, urlValue, pathValue)
+}
+
+func chooseOB11MediaSourceValues(file, urlValue, pathValue string) string {
+	if file != "" {
+		if strings.Contains(file, "://") || strings.HasPrefix(file, "base64://") || (urlValue == "" && pathValue == "") {
+			return file
+		}
+		if urlValue != "" {
+			return urlValue
+		}
+		if pathValue != "" {
+			return pathValue
+		}
+	}
+	if urlValue != "" {
+		return urlValue
+	}
+	return pathValue
+}
+
+func ob11SegmentToElement(seg ob11Segment) types.IMessageElement {
+	data := segmentDataStringMap(seg.Data)
+	if len(data) == 0 {
+		return nil
+	}
+	if seg.Type == "text" {
+		if text := data["text"]; text != "" {
+			return &types.TextElement{Content: text}
+		}
+		return nil
+	}
+	if seg.Type == "poke" {
+		data["qq"] = firstNonEmpty(data["qq"], data["id"], data["user_id"])
+	}
+	if seg.Type == "image" || seg.Type == "record" || seg.Type == "file" {
+		if source := chooseOB11MediaSourceValues(data["file"], data["url"], data["path"]); source != "" {
+			data["url"] = source
+		}
+	}
+	elem, _ := types.ElementFromCQData(seg.Type, data)
+	return elem
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // getPendingKeys 获取pending map中的所有key，用于调试
 func (pa *PlatformAdapterOB11) getPendingKeys() []string {
-	var keys []string
-	pa.pending.Range(func(key, value interface{}) bool {
-		if k, ok := key.(string); ok {
-			keys = append(keys, k)
-		}
-		return true
-	})
-	return keys
+	return pa.echoWaiter.pendingKeys()
+}
+
+func (pa *PlatformAdapterOB11) getDroppedEchoCount() uint64 {
+	return pa.echoWaiter.droppedCount()
 }
 
 type ob11BaseFrame struct {
@@ -1145,7 +1293,6 @@ func (pa *PlatformAdapterOB11) GroupFileList(request *GroupFileListRequest) (*Gr
 	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 	defer cancel()
 
-	fmt.Println("???", apiAction, params)
 	err := pa.callAction(ctx, apiAction, params, &rawResponse)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get group file list: %w", err)

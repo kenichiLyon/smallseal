@@ -313,6 +313,8 @@ func toElement(t string, dMap map[string]string) (IMessageElement, error) {
 	case "tts":
 		content := dMap["text"]
 		return &TTSElement{Content: content}, nil
+	case "face":
+		return &FaceElement{FaceID: dMap["id"]}, nil
 	case "reply":
 		target := dMap["id"]
 		return &ReplyElement{ReplySeq: target}, nil
@@ -321,6 +323,10 @@ func toElement(t string, dMap map[string]string) (IMessageElement, error) {
 		return &PokeElement{Target: target}, nil
 	}
 	return CQToText(t, dMap), nil
+}
+
+func ElementFromCQData(t string, dMap map[string]string) (IMessageElement, error) {
+	return toElement(t, dMap)
 }
 
 func ImageRewrite(longText string, solve func(text string) string) string {
