@@ -11,7 +11,7 @@ require (
 	github.com/lascape/sat v1.0.4
 	github.com/peterh/liner v1.2.2
 	github.com/samber/lo v1.51.0
-	github.com/sealdice/dicescript v0.0.0-20251223051345-e8d2002150cd
+	github.com/sealdice/dicescript v0.0.0-20260103130502-bd5621347a4e
 	github.com/stretchr/testify v1.9.0
 	github.com/tidwall/buntdb v1.3.1
 	go.uber.org/zap v1.27.0
